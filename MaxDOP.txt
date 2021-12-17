@@ -1,0 +1,71 @@
+--https://dba.stackexchange.com/questions/36522/maxdop-setting-algorithm-for-sql-server/36578#36578
+
+select
+[ServerName]                    = @@SERVERNAME
+, [ComputerName]                = SERVERPROPERTY('ComputerNamePhysicalNetBIOS') 
+, [LogicalCPUs]             
+, hyperthread_ratio 
+, [PhysicalCPU]             
+, [HTEnabled]               
+, LogicalCPUPerNuma
+, [NoOfNUMA]
+, [MaxDop_Recommended]          = convert(int,case when [MaxDop_RAW] > 10 then 10 else [MaxDop_RAW] end)
+, [MaxDop_Current]              = sc.value
+, [MaxDop_RAW]
+, [Number of Cores] 
+from
+(
+select
+     [LogicalCPUs]              
+    , hyperthread_ratio 
+    , [PhysicalCPU]             
+    , [HTEnabled]               
+    , LogicalCPUPerNuma
+    , [NoOfNUMA]
+    , [Number of Cores] 
+    , [MaxDop_RAW]              = 
+        case
+            when [NoOfNUMA] > 1 AND HTEnabled = 0 then logicalCPUPerNuma 
+            when [NoOfNUMA] > 1 AND HTEnabled = 1 then convert(decimal(9,4),[NoOfNUMA]/ convert(decimal(9,4),Res_MAXDOP.PhysicalCPU) * convert(decimal(9,4),1))
+            when HTEnabled = 0 then  Res_MAXDOP.LogicalCPUs
+            when HTEnabled = 1 then  Res_MAXDOP.PhysicalCPU
+        end
+from
+(
+    select
+         [LogicalCPUs]              = osi.cpu_count
+        , osi.hyperthread_ratio 
+        , [PhysicalCPU]             = osi.cpu_count/osi.hyperthread_ratio
+        , [HTEnabled]               = case when osi.cpu_count > osi.hyperthread_ratio then 1 else 0 end
+        , LogicalCPUPerNuma
+        , [NoOfNUMA]
+        , [Number of Cores] 
+    from 
+    (
+        select
+            [NoOfNUMA]  = count(res.parent_node_id)
+            ,[Number of Cores]  = res.LogicalCPUPerNuma/count(res.parent_node_id)
+            ,res.LogicalCPUPerNuma
+        from
+        (
+            Select
+                s.parent_node_id
+                ,LogicalCPUPerNuma  = count(1)
+            from
+                sys.dm_os_schedulers s
+            where
+                s.parent_node_id < 64
+                and
+                s.status = 'VISIBLE ONLINE'
+            group by 
+                s.parent_node_id
+        ) Res
+        group by
+            res.LogicalCPUPerNuma
+    ) Res_NUMA
+    cross apply sys.dm_os_sys_info osi
+) Res_MAXDOP
+)Res_Final
+cross apply sys.sysconfigures sc
+where sc.comment = 'maximum degree of parallelism'
+option (recompile);
